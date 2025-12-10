@@ -1,0 +1,13 @@
+# 忽略数据库数据文件
+data/
+/data
+
+# 忽略 Python 缓存和虚拟环境
+__pycache__/
+*.pyc
+venv/
+.env
+
+# 忽略 IDE 配置
+.vscode/
+.idea/
