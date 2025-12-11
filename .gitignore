@@ -11,3 +11,17 @@ venv/
 # 忽略 IDE 配置
 .vscode/
 .idea/
+
+# 忽略前端依赖包 (非常重要！)
+node_modules/
+**/node_modules/
+frontend/node_modules/
+
+# 忽略 npm 调试日志
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 忽略编译后的前端产物 (以后打包会生成)
+dist/
+**/dist/

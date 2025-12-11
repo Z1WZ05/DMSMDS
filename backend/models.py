@@ -1,4 +1,3 @@
-# backend/models.py
 from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Text, UniqueConstraint, Unicode
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.sql import func
@@ -19,6 +18,15 @@ class Warehouse(Base):
     name = Column(Unicode(100), nullable=False)
     location = Column(Unicode(200))
 
+class User(Base):
+    """【新增】用户表"""
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(50), unique=True, nullable=False)
+    password = Column(String(100), nullable=False)
+    role = Column(String(20), nullable=False)
+    branch_id = Column(Integer, ForeignKey('warehouses.id'), nullable=False)
+
 class Inventory(Base):
     __tablename__ = 'inventory'
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -37,6 +45,15 @@ class AuditLog(Base):
     operation_type = Column(String(20))
     operator_id = Column(Integer)
     create_time = Column(DateTime, default=func.now())
+
+class AlertMessage(Base):
+    """【新增】预警消息"""
+    __tablename__ = 'alert_messages'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    warehouse_id = Column(Integer)
+    message = Column(Unicode(500))
+    create_time = Column(DateTime, default=func.now())
+    is_read = Column(Integer, default=0)
 
 class SyncConflictLog(Base):
     __tablename__ = 'sync_conflict_logs'
