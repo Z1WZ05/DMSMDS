@@ -8,13 +8,17 @@
       
       <el-menu :default-active="activeTab" class="el-menu-vertical" @select="handleSelect" background-color="#001529" text-color="#fff" active-text-color="#409EFF">
         
-        <!-- 通用菜单 -->
         <el-menu-item index="1">
           <el-icon><Goods /></el-icon>
           <span>药品库存 / 开药</span>
         </el-menu-item>
 
-        <!-- 仅管理员可见 -->
+        <!-- 【新增】处方管理 -->
+        <el-menu-item index="6">
+          <el-icon><Tickets /></el-icon>
+          <span>处方记录管理</span>
+        </el-menu-item>
+
         <el-menu-item index="2" v-if="isAdmin">
           <el-icon><Warning /></el-icon>
           <span>冲突监控与处理</span>
@@ -25,13 +29,11 @@
           <span>全院数据报表</span>
         </el-menu-item>
 
-        <!-- 【新增】医护个人中心 (非管理员) -->
         <el-menu-item index="4" v-if="!isAdmin">
           <el-icon><List /></el-icon>
-          <span>我的操作记录</span>
+          <span>我的操作流水</span>
         </el-menu-item>
 
-        <!-- 【新增】用户管理 (管理员) -->
         <el-menu-item index="5" v-if="isAdmin">
           <el-icon><User /></el-icon>
           <span>系统用户管理</span>
@@ -51,13 +53,13 @@
       </el-header>
 
       <el-main>
-        <!-- 动态组件区域 -->
         <MedicineView v-if="activeTab === '1'" />
         <ConflictView v-if="activeTab === '2'" />
         <AnalysisView v-if="activeTab === '3'" />
-        <!-- 新增组件挂载 -->
         <MyRecordsView v-if="activeTab === '4'" />
         <UserManagement v-if="activeTab === '5'" />
+        <!-- 新增组件 -->
+        <PrescriptionList v-if="activeTab === '6'" />
       </el-main>
     </el-container>
   </el-container>
@@ -66,28 +68,27 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
-// 引入所有组件
 import MedicineView from '../components/MedicineView.vue'
 import ConflictView from '../components/ConflictView.vue'
 import AnalysisView from '../components/AnalysisView.vue'
-// 【新增】引入新组件
 import MyRecordsView from '../components/MyRecordsView.vue'
 import UserManagement from '../components/UserManagement.vue'
+import PrescriptionList from '../components/PrescriptionList.vue' // 引入新组件
 
 const router = useRouter()
 const activeTab = ref('1')
 const username = localStorage.getItem('username')
 const role = localStorage.getItem('role')
 
-// 判断是否为管理员 (branch_admin 或 super_admin)
 const isAdmin = computed(() => role && role.includes('admin'))
 
 const titleMap = {
   '1': '药品库存管理',
   '2': '数据冲突处理中心',
   '3': '数据可视化分析',
-  '4': '我的操作流水', // 新增
-  '5': '系统用户权限管理' // 新增
+  '4': '我的操作流水',
+  '5': '系统用户权限管理',
+  '6': '处方记录管理'
 }
 const currentTitle = computed(() => titleMap[activeTab.value])
 

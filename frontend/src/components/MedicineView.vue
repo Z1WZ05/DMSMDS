@@ -1,106 +1,205 @@
 <template>
-  <el-card>
-    <template #header>
-      <div class="card-header">
-        <div class="title-box">
-          <span>📦 药品库存总览</span>
-          <el-tag v-if="!canSwitchDb" type="info" class="ml-2">
-            当前院区: {{ currentDbName }}
-          </el-tag>
+  <div class="medicine-view">
+    <el-row :gutter="20">
+      <!-- 左侧：药品列表 -->
+      <el-col :span="16">
+        <el-card>
+          <template #header>
+            <div class="card-header">
+              <div class="title-box">
+                <span>📦 药品库存总览</span>
+                <el-tag v-if="!canSwitchDb" type="info" class="ml-2">
+                  当前院区: {{ currentDbName }}
+                </el-tag>
+              </div>
+              <el-select 
+                v-if="canSwitchDb" 
+                v-model="selectedDb" 
+                placeholder="切换院区视图" 
+                @change="fetchData" 
+                style="width: 200px;">
+                <el-option label="第一分院 (MySQL)" value="mysql" />
+                <el-option label="第二分院 (PG)" value="pg" />
+                <el-option label="总院 (MSSQL)" value="mssql" />
+              </el-select>
+            </div>
+          </template>
+
+          <el-table :data="mergedData" stripe style="width: 100%" v-loading="loading">
+            <el-table-column prop="name" label="药品名称" width="150" />
+            <el-table-column prop="category" label="分类" width="100" />
+            <el-table-column prop="price" label="单价" width="80" />
+            <el-table-column prop="quantity" label="库存" width="100">
+              <template #default="scope">
+                <span :class="{'low-stock': scope.row.quantity < 20}">{{ scope.row.quantity }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="danger_level" label="等级" width="100">
+              <template #default="scope">
+                <el-tag :type="getRiskTagType(scope.row.danger_level)" size="small">
+                  {{ scope.row.danger_level }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            
+            <el-table-column label="操作" min-width="120">
+              <template #default="scope">
+                 <!-- 医护功能：加入清单 -->
+                 <el-button 
+                   v-if="!userRole.includes('admin')" 
+                   type="success" plain size="small" 
+                   @click="addToCart(scope.row)">
+                   + 加入清单
+                 </el-button>
+                 
+                 <!-- 超管功能：调拨 -->
+                 <el-button 
+                   v-if="userRole === 'super_admin' && selectedDb === 'mssql'" 
+                   type="warning" size="small" 
+                   @click="openAllocationDialog(scope.row)">
+                   调拨
+                 </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+      </el-col>
+
+      <!-- 右侧：处方篮 (仅医护可见) -->
+      <el-col :span="8" v-if="!userRole.includes('admin')">
+        <el-card class="cart-card">
+          <template #header>
+            <div class="card-header">
+              <span>📝 待开处方清单</span>
+              <el-tag type="warning" effect="dark">{{ cart.length }} 项</el-tag>
+            </div>
+          </template>
+
+          <div v-if="cart.length === 0" class="empty-cart">
+            <el-empty description="暂无药品，请从左侧添加" :image-size="80" />
+          </div>
+
+          <div v-else>
+            <div v-for="(item, index) in cart" :key="item.id" class="cart-item">
+              <div class="item-info">
+                <div class="item-name">{{ item.name }}</div>
+                <div class="item-price">¥{{ item.price }} × </div>
+              </div>
+              <div class="item-action">
+                <el-input-number v-model="item.count" :min="1" :max="item.maxStock" size="small" style="width: 100px" />
+                <el-button type="danger" link size="small" @click="removeFromCart(index)">删除</el-button>
+              </div>
+            </div>
+
+            <div class="cart-footer">
+              <div class="total-price">
+                预估总价: <span>¥{{ cartTotal.toFixed(2) }}</span>
+              </div>
+              <el-button type="primary" class="submit-btn" @click="openPrescribeDialog" size="large">
+                生成处方并结算
+              </el-button>
+            </div>
+          </div>
+        </el-card>
+      </el-col>
+    </el-row>
+
+    <!-- 结算弹窗 -->
+    <el-dialog v-model="prescribeDialog.visible" title="✅ 确认处方信息" width="400px">
+      <el-form label-width="80px">
+        <el-form-item label="病人姓名">
+          <el-input v-model="prescribeDialog.patientName" placeholder="请输入病人真实姓名" />
+        </el-form-item>
+        <el-divider>药品明细</el-divider>
+        <div v-for="item in cart" :key="item.id" class="dialog-item">
+          <span>{{ item.name }}</span>
+          <span>x {{ item.count }}</span>
         </div>
+        <el-divider />
+        <div class="dialog-total">总金额：¥{{ cartTotal.toFixed(2) }}</div>
+      </el-form>
+      <template #footer>
+        <el-button @click="prescribeDialog.visible = false">取消</el-button>
+        <el-button type="primary" @click="submitPrescription" :loading="submitting">确认提交</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 调拨弹窗 (已升级：支持任意库之间调拨) -->
+    <el-dialog v-model="allocDialog.visible" title="🚚 全网物资调拨指令" width="450px">
+      <el-form label-width="80px">
+        <el-form-item label="调拨药品">
+          <el-input v-model="allocDialog.medicineName" disabled />
+        </el-form-item>
         
-        <!-- 只有超级管理员(super_admin)才能切换查看其他院区 -->
-        <el-select 
-          v-if="canSwitchDb" 
-          v-model="selectedDb" 
-          placeholder="切换院区视图" 
-          @change="fetchData" 
-          style="width: 200px;">
-          <el-option label="第一分院 (MySQL)" value="mysql" />
-          <el-option label="第二分院 (PG)" value="pg" />
-          <el-option label="总院 (MSSQL)" value="mssql" />
-        </el-select>
-      </div>
-    </template>
+        <el-form-item label="调出仓库">
+          <el-select v-model="allocDialog.sourceBranchId" placeholder="选择发货方">
+            <el-option label="第一分院 (MySQL)" :value="1" />
+            <el-option label="第二分院 (PostgreSQL)" :value="2" />
+            <el-option label="集团总库 (MSSQL)" :value="3" />
+          </el-select>
+        </el-form-item>
 
-    <el-table :data="mergedData" stripe style="width: 100%" v-loading="loading">
-      <el-table-column prop="id" label="ID" width="60" />
-      <el-table-column prop="name" label="药品名称" width="180" />
-      <el-table-column prop="category" label="分类" width="100" />
-      <el-table-column prop="price" label="单价(元)" width="100" />
-      
-      <!-- 新增：显示库存 -->
-      <el-table-column prop="quantity" label="当前库存" width="120">
-        <template #default="scope">
-          <span :class="{'low-stock': scope.row.quantity < 20}">
-            {{ scope.row.quantity }} 
-            <el-tag size="small" type="danger" v-if="scope.row.quantity < 20">紧缺</el-tag>
-          </span>
-        </template>
-      </el-table-column>
+        <el-form-item label="调入仓库">
+          <el-select v-model="allocDialog.targetBranchId" placeholder="选择接收方">
+            <el-option label="第一分院 (MySQL)" :value="1" />
+            <el-option label="第二分院 (PostgreSQL)" :value="2" />
+            <el-option label="集团总库 (MSSQL)" :value="3" />
+          </el-select>
+        </el-form-item>
+        
+        <el-form-item label="调拨数量">
+          <el-input-number v-model="allocDialog.quantity" :min="1" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="allocDialog.visible = false">取消</el-button>
+        <el-button type="warning" @click="submitAllocation" :loading="submitting">确认调拨</el-button>
+      </template>
+    </el-dialog>
 
-      <el-table-column prop="danger_level" label="管控等级" width="120">
-        <template #default="scope">
-          <el-tag :type="getRiskTagType(scope.row.danger_level)">
-            {{ scope.row.danger_level }}
-          </el-tag>
-        </template>
-      </el-table-column>
-      
-      <el-table-column label="操作" min-width="150">
-        <template #default="scope">
-           <!-- 超管功能：制造冲突 -->
-           <el-button 
-             v-if="userRole === 'super_admin' && selectedDb === 'mssql'" 
-             type="danger" plain size="small" 
-             @click="simulateConflict(scope.row)">
-             修改库存(测)
-           </el-button>
-
-           <!-- 医护功能：开药 (管理员不能开) -->
-           <el-button 
-             v-if="!userRole.includes('admin')" 
-             type="primary" size="small" 
-             @click="openPrescribeDialog(scope.row)">
-             开药
-           </el-button>
-        </template>
-      </el-table-column>
-    </el-table>
-  </el-card>
+  </div>
 </template>
 
 <script setup>
 import { ref, onMounted, computed } from 'vue'
 import axios from 'axios'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 
 const userRole = localStorage.getItem('role') || ''
 const userDb = localStorage.getItem('db_name') || 'mysql'
-
-// 权限判断：只有 super_admin 可以切换视角
 const canSwitchDb = computed(() => userRole === 'super_admin')
-
-// 如果不能切换，就锁定在用户自己的 db
 const selectedDb = ref(canSwitchDb.value ? 'mssql' : userDb)
 
 const medicines = ref([])
-const inventoryMap = ref({}) // 存储 {medicine_id: quantity}
+const inventoryMap = ref({})
 const loading = ref(false)
+const submitting = ref(false)
 
-const dbNames = {
-  'mysql': '第一分院 (MySQL)',
-  'pg': '第二分院 (PostgreSQL)',
-  'mssql': '集团总院 (SQL Server)'
-}
+// 购物车数据
+const cart = ref([])
+
+const prescribeDialog = ref({ visible: false, patientName: '' })
+const allocDialog = ref({ 
+  visible: false, 
+  medicineId: 0, 
+  medicineName: '', 
+  sourceBranchId: 3, // 默认源为总库
+  targetBranchId: 1, 
+  quantity: 10 
+})
+
+const dbNames = { 'mysql': '第一分院 (MySQL)', 'pg': '第二分院 (PostgreSQL)', 'mssql': '集团总院 (SQL Server)' }
 const currentDbName = computed(() => dbNames[selectedDb.value])
 
-// 合并药品信息和库存信息
 const mergedData = computed(() => {
   return medicines.value.map(med => ({
     ...med,
-    quantity: inventoryMap.value[med.id] || 0 // 匹配库存
+    quantity: inventoryMap.value[med.id] || 0
   }))
+})
+
+const cartTotal = computed(() => {
+  return cart.value.reduce((sum, item) => sum + item.price * item.count, 0)
 })
 
 const getRiskTagType = (level) => {
@@ -112,71 +211,119 @@ const getRiskTagType = (level) => {
 const fetchData = async () => {
   loading.value = true
   try {
-    // 1. 获取药品列表 (基础信息)
     const resMed = await axios.get(`http://127.0.0.1:8000/medicines/${selectedDb.value}`)
     medicines.value = resMed.data
-    
-    // 2. 获取库存信息 (需要后端新增一个接口，或者复用 analysis)
-    // 为了简单，我们临时写一个逻辑：
-    // 这里其实应该有一个 /inventory/{db_name} 接口，但我们之前的 analysis/inventory-value 是聚合的。
-    // 【临时方案】：我们假设 medicines 接口返回的数据里还没库存。
-    // 我们需要去后端加一个接口，或者在 /medicines 接口里把库存带上。
-    
-    // 这里的逻辑有点卡壳，因为之前的 /medicines 接口只查了 medicine 表。
-    // 我们去后端 business.py 加一个 "查询带库存的药品列表" 接口吧。
-    // 假设现在有了：GET /business/stock/{db_name}
     const resInv = await axios.get(`http://127.0.0.1:8000/business/stock/${selectedDb.value}`)
-    
-    // 转换库存数据格式
     const map = {}
-    resInv.data.forEach(item => {
-      map[item.medicine_id] = item.quantity
-    })
+    resInv.data.forEach(item => { map[item.medicine_id] = item.quantity })
     inventoryMap.value = map
-
   } catch (error) {
     ElMessage.error('数据加载失败')
-    console.error(error)
   } finally {
     loading.value = false
   }
 }
 
-// ... (simulateConflict 和 openPrescribeDialog 代码保持不变，复制过来即可) ...
-const openPrescribeDialog = (row) => {
-  ElMessageBox.prompt(`开具 ${row.name} 数量：`, '医生开药', {
-    confirmButtonText: '确认开方',
-    inputPattern: /^\d+$/,
-    inputErrorMessage: '请输入数字'
-  }).then(async ({ value }) => {
-    try {
-      const token = localStorage.getItem('token')
-      await axios.post('http://127.0.0.1:8000/business/prescribe', {
-        medicine_id: row.id,
-        quantity: parseInt(value)
-      }, {
-        headers: { Authorization: `Bearer ${token}` }
-      })
-      ElMessage.success('开药成功！库存已自动扣减。')
-      fetchData() // 刷新列表
-    } catch (e) {
-      ElMessage.error(e.response?.data?.detail || '开药失败')
+// 加入清单
+const addToCart = (row) => {
+  if (row.quantity <= 0) return ElMessage.warning('库存不足')
+  
+  const existingItem = cart.value.find(item => item.id === row.id)
+  if (existingItem) {
+    if (existingItem.count < row.quantity) {
+      existingItem.count++
+    } else {
+      ElMessage.warning('已达到最大库存限制')
     }
-  })
+  } else {
+    cart.value.push({
+      id: row.id,
+      name: row.name,
+      price: row.price,
+      count: 1,
+      maxStock: row.quantity
+    })
+  }
 }
 
-// 模拟冲突代码复制过来...
-const simulateConflict = (row) => {
-    // ... 代码同前 ...
-    ElMessageBox.prompt('输入新库存（总院强制修改）', '制造冲突', {
-      confirmButtonText: '确定',
-      inputPattern: /^\d+$/
-    }).then(async ({ value }) => {
-       await axios.post('http://127.0.0.1:8000/medicines/simulate-central-update', null, {
-        params: { warehouse_id: 1, medicine_id: row.id, new_quantity: value }
-      })
-      ElMessage.success('冲突已制造，请观察监控')
+const removeFromCart = (index) => {
+  cart.value.splice(index, 1)
+}
+
+const openPrescribeDialog = () => {
+  if (cart.value.length === 0) return ElMessage.warning('请先选择药品')
+  prescribeDialog.value.visible = true
+}
+
+// 提交处方
+const submitPrescription = async () => {
+  if (!prescribeDialog.value.patientName) return ElMessage.warning('请输入病人姓名')
+  
+  submitting.value = true
+  try {
+    const token = localStorage.getItem('token')
+    
+    const itemsPayload = cart.value.map(item => ({
+      medicine_id: item.id,
+      quantity: item.count
+    }))
+
+    const payload = {
+      patient_name: prescribeDialog.value.patientName,
+      items: itemsPayload
+    }
+    
+    await axios.post('http://127.0.0.1:8000/business/prescription/create', payload, {
+      headers: { Authorization: `Bearer ${token}` }
     })
+    
+    ElMessage.success('处方开具成功！')
+    prescribeDialog.value.visible = false
+    cart.value = [] // 清空购物车
+    fetchData() // 刷新库存
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '开药失败')
+  } finally {
+    submitting.value = false
+  }
+}
+
+// 打开调拨弹窗
+const openAllocationDialog = (row) => {
+  allocDialog.value = { 
+    visible: true, 
+    medicineId: row.id, 
+    medicineName: row.name, 
+    sourceBranchId: 3, 
+    targetBranchId: 1, 
+    quantity: 10 
+  }
+}
+
+// 提交调拨
+const submitAllocation = async () => {
+  if(allocDialog.value.sourceBranchId === allocDialog.value.targetBranchId) {
+    return ElMessage.warning('源仓库和目标仓库不能相同')
+  }
+
+  submitting.value = true
+  try {
+    const token = localStorage.getItem('token')
+    await axios.post('http://127.0.0.1:8000/business/allocation/create', {
+      medicine_id: allocDialog.value.medicineId,
+      source_branch_id: allocDialog.value.sourceBranchId, // 新增参数
+      target_branch_id: allocDialog.value.targetBranchId,
+      quantity: allocDialog.value.quantity
+    }, { headers: { Authorization: `Bearer ${token}` } })
+    
+    ElMessage.success('调拨指令已发出，请留意冲突监控')
+    allocDialog.value.visible = false
+    fetchData()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '调拨失败')
+  } finally {
+    submitting.value = false
+  }
 }
 
 onMounted(fetchData)
@@ -187,4 +334,17 @@ onMounted(fetchData)
 .title-box { display: flex; align-items: center; }
 .ml-2 { margin-left: 10px; }
 .low-stock { color: red; font-weight: bold; }
+
+/* 购物车样式 */
+.cart-card { min-height: 400px; border-left: 1px solid #EBEEF5; }
+.cart-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px dashed #eee; }
+.item-info { flex: 1; }
+.item-name { font-weight: bold; font-size: 14px; }
+.item-price { color: #909399; font-size: 12px; }
+.cart-footer { margin-top: 20px; text-align: right; }
+.total-price { font-size: 16px; margin-bottom: 15px; }
+.total-price span { color: #F56C6C; font-weight: bold; font-size: 20px; }
+.submit-btn { width: 100%; }
+.dialog-item { display: flex; justify-content: space-between; padding: 5px 0; }
+.dialog-total { text-align: right; font-size: 18px; color: #F56C6C; font-weight: bold; margin-top: 10px; }
 </style>

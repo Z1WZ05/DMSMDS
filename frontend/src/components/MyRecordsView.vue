@@ -3,12 +3,11 @@
     <template #header>
       <div class="card-header">
         <span>📝 我的操作记录流水</span>
-        <el-tag type="info">只显示最近 50 条</el-tag>
       </div>
     </template>
 
     <el-table :data="records" stripe style="width: 100%" v-loading="loading">
-      <el-table-column prop="create_time" label="操作时间" width="220">
+      <el-table-column prop="create_time" label="操作时间" width="200">
         <template #default="scope">
           {{ new Date(scope.row.create_time).toLocaleString() }}
         </template>
@@ -16,11 +15,20 @@
       
       <el-table-column prop="operation_type" label="类型" width="120">
         <template #default="scope">
-          <el-tag effect="plain">{{ scope.row.operation_type }}</el-tag>
+          <el-tag :type="scope.row.operation_type.includes('ALLOCATE') ? 'warning' : ''">
+            {{ scope.row.operation_type }}
+          </el-tag>
         </template>
       </el-table-column>
       
-      <el-table-column prop="medicine_name" label="涉及药品" />
+      <!-- 新增：业务详情 -->
+      <el-table-column prop="description" label="业务详情" width="250">
+        <template #default="scope">
+          <span style="font-family: monospace; font-size: 12px;">{{ scope.row.description || '-' }}</span>
+        </template>
+      </el-table-column>
+
+      <el-table-column prop="medicine_name" label="药品名称" />
       
       <el-table-column prop="change_amount" label="库存变动">
         <template #default="scope">
@@ -58,7 +66,6 @@ const fetchRecords = async () => {
 
 onMounted(fetchRecords)
 </script>
-
 <style scoped>
 .card-header { display: flex; justify-content: space-between; align-items: center; }
 </style>
