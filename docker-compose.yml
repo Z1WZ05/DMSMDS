@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  # 1. MySQL (保持不变，它比较皮实)
+  # 1. MySQL (模拟分院 A)
   db_mysql:
     image: mysql:8.0
     container_name: medical_mysql
@@ -9,13 +9,14 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: RootPassword123!
       MYSQL_DATABASE: region_a_db
+      TZ: Asia/Shanghai  # 【修改】设置时区
     ports:
       - "33061:3306"
     volumes:
       - ./data/mysql:/var/lib/mysql
     command: --default-authentication-plugin=mysql_native_password
 
-  # 2. PostgreSQL (保持不变)
+  # 2. PostgreSQL (模拟分院 B)
   db_pg:
     image: postgres:14
     container_name: medical_pg
@@ -24,12 +25,13 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: RootPassword123!
       POSTGRES_DB: region_b_db
+      TZ: Asia/Shanghai  # 【修改】设置时区
     ports:
       - "5432:5432"
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
 
-  # 3. SQL Server (重大修改：改用 Named Volume)
+  # 3. SQL Server (模拟集团总库)
   db_mssql:
     image: mcr.microsoft.com/mssql/server:2019-latest
     container_name: medical_mssql
@@ -37,12 +39,11 @@ services:
     environment:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: RootPassword123!
+      TZ: Asia/Shanghai  # 【修改】设置时区
     ports:
       - "14330:1433"
     volumes:
-      # 注意这里！不再指向 ./data/mssql，而是指向下面的 mssql_data
       - mssql_data:/var/opt/mssql
 
-# 在文件最底部添加这个
 volumes:
   mssql_data:

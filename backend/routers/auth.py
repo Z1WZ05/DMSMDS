@@ -6,12 +6,11 @@ from .. import models, security
 
 router = APIRouter(prefix="/auth", tags=["认证与登录"])
 
-# 【核心修复】定义数据库与分院ID的绑定关系
-# 必须和 seed_data.py 里的定义一致
-DB_BRANCH_MAP = {
-    "mysql": 1,   # MySQL 对应 分院1
-    "pg": 2,      # PG 对应 分院2
-    "mssql": 3    # MSSQL 对应 总院
+# 分院ID 到 数据库名 的映射
+BRANCH_DB_MAP = {
+    1: "mysql",   # 分院1 -> MySQL
+    2: "pg",      # 分院2 -> PostgreSQL
+    3: "mssql"    # 总院 -> SQL Server
 }
 
 @router.post("/login")
@@ -20,53 +19,43 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
     password = form_data.password
     
     user = None
-    target_db_name = None
     
-    # 轮询查找用户
-    for db_name in ["mysql", "pg", "mssql"]:
-        db = SessionLocals[db_name]()
+    # 1. 轮询所有数据库查找用户 (利用数据冗余提高可用性)
+    for db_scan in ["mysql", "pg", "mssql"]:
+        db = SessionLocals[db_scan]()
         try:
-            # 1. 查找用户
             found_user = db.query(models.User).filter(models.User.username == username).first()
-            
             if found_user:
-                # 2. 验证密码
-                if found_user.password == password:
-                    # 3. 【关键修复】验证归属权 (Authority Check)
-                    # 只有当用户的 branch_id 与当前数据库的身份匹配时，才允许登录
-                    # 或者是超级管理员(branch_id=3)，我们允许他在总院登录
-                    
-                    expected_branch_id = DB_BRANCH_MAP.get(db_name)
-                    
-                    if found_user.branch_id == expected_branch_id:
-                        user = found_user
-                        target_db_name = db_name
-                        break # 找到了真正的本尊，停止轮询
-                    else:
-                        # 虽然在这个库找到了用户，但它的 branch_id 不对
-                        # 说明这是同步过来的“副本账号”，不能用来登录
-                        # 继续找下一个库...
-                        pass
-        except Exception as e:
-            print(f"Login error in {db_name}: {e}")
+                # 验证密码
+                if security.verify_password(password, found_user.password):
+                    user = found_user
+                    break # 密码验证通过，跳出循环
+        except Exception:
+            continue
         finally:
             db.close()
     
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="用户名密码错误，或未找到归属分院",
+            detail="用户名或密码错误",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # 生成 Token
+    # 2. 智能路由：根据 branch_id 决定该用户应该去连哪个库
+    target_db_name = BRANCH_DB_MAP.get(user.branch_id)
+    
+    if not target_db_name:
+        raise HTTPException(status_code=500, detail=f"配置错误：未知的分院ID {user.branch_id}")
+
+    # 3. 生成 Token
     access_token = security.create_access_token(
         data={
             "sub": user.username, 
             "role": user.role, 
             "branch_id": user.branch_id,
             "user_id": user.id,
-            "db_name": target_db_name 
+            "db_name": target_db_name # 前端后续请求都会发往这个库
         }
     )
     

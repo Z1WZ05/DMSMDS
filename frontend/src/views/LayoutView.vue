@@ -24,6 +24,19 @@
           <el-icon><DataLine /></el-icon>
           <span>全院数据报表</span>
         </el-menu-item>
+
+        <!-- 【新增】医护个人中心 (非管理员) -->
+        <el-menu-item index="4" v-if="!isAdmin">
+          <el-icon><List /></el-icon>
+          <span>我的操作记录</span>
+        </el-menu-item>
+
+        <!-- 【新增】用户管理 (管理员) -->
+        <el-menu-item index="5" v-if="isAdmin">
+          <el-icon><User /></el-icon>
+          <span>系统用户管理</span>
+        </el-menu-item>
+
       </el-menu>
     </el-aside>
 
@@ -42,6 +55,9 @@
         <MedicineView v-if="activeTab === '1'" />
         <ConflictView v-if="activeTab === '2'" />
         <AnalysisView v-if="activeTab === '3'" />
+        <!-- 新增组件挂载 -->
+        <MyRecordsView v-if="activeTab === '4'" />
+        <UserManagement v-if="activeTab === '5'" />
       </el-main>
     </el-container>
   </el-container>
@@ -50,10 +66,13 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
-// 引入之前的组件
+// 引入所有组件
 import MedicineView from '../components/MedicineView.vue'
 import ConflictView from '../components/ConflictView.vue'
 import AnalysisView from '../components/AnalysisView.vue'
+// 【新增】引入新组件
+import MyRecordsView from '../components/MyRecordsView.vue'
+import UserManagement from '../components/UserManagement.vue'
 
 const router = useRouter()
 const activeTab = ref('1')
@@ -61,12 +80,14 @@ const username = localStorage.getItem('username')
 const role = localStorage.getItem('role')
 
 // 判断是否为管理员 (branch_admin 或 super_admin)
-const isAdmin = computed(() => role.includes('admin'))
+const isAdmin = computed(() => role && role.includes('admin'))
 
 const titleMap = {
   '1': '药品库存管理',
   '2': '数据冲突处理中心',
-  '3': '数据可视化分析'
+  '3': '数据可视化分析',
+  '4': '我的操作流水', // 新增
+  '5': '系统用户权限管理' // 新增
 }
 const currentTitle = computed(() => titleMap[activeTab.value])
 

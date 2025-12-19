@@ -1,108 +1,154 @@
 import time
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, and_
+from sqlalchemy import inspect
 from .database import SessionLocals
 from . import models
 
 scheduler = BackgroundScheduler()
 
+# 定义所有节点
+ALL_DBS = ["mysql", "pg", "mssql"]
+
+# 定义数据归属 (Warehouse ID -> 负责的 DB Name)
+OWNER_MAP = {
+    1: "mysql", # 仓库1 归 MySQL 管
+    2: "pg",    # 仓库2 归 PG 管
+    3: "mssql"  # 仓库3 归 MSSQL 管
+}
+
+# 定义用户归属 (Branch ID -> 负责的 DB Name)
+USER_OWNER_MAP = {
+    1: "mysql",
+    2: "pg",
+    3: "mssql"
+}
+
 def get_db_session(db_name):
     return SessionLocals[db_name]()
 
-def log_conflict(db_session, table, record_id, src_db, tgt_db, reason):
-    """记录冲突"""
-    exists = db_session.query(models.SyncConflictLog).filter(
-        models.SyncConflictLog.record_id == record_id,
-        models.SyncConflictLog.table_name == table,
-        models.SyncConflictLog.status == 'PENDING'
-    ).first()
-    
-    if not exists:
-        print(f"📧 [模拟发送邮件] 冲突报警: {reason}")
-        conflict = models.SyncConflictLog(
-            table_name=table,
-            record_id=record_id,
-            source_db=src_db,
-            target_db=tgt_db,
-            conflict_reason=reason,
-            status='PENDING'
-        )
-        db_session.add(conflict)
-        db_session.commit()
-
-def sync_branch_logic(branch_db_name: str, branch_cn_name: str, my_warehouse_id: int):
-    """
-    分院与总院的同步逻辑 (全量数据版)
-    :param my_warehouse_id: 当前分院拥有写权限的仓库ID (如 MySQL 是 1)
-    """
-    # print(f"🔄 同步检查: {branch_cn_name} <-> 总院")
-    
-    branch_db = get_db_session(branch_db_name)
-    central_db = get_db_session("mssql")
-    
+def log_conflict(table, record_id, owner_db, intruder_db, reason):
+    """记录冲突到总库"""
+    mssql = SessionLocals["mssql"]()
     try:
-        # 获取分院所有库存
-        branch_items = branch_db.query(models.Inventory).all()
+        exists = mssql.query(models.SyncConflictLog).filter(
+            models.SyncConflictLog.record_id == record_id,
+            models.SyncConflictLog.table_name == table,
+            models.SyncConflictLog.status == 'PENDING'
+        ).first()
         
-        for b_item in branch_items:
-            # 在总院找对应记录
-            c_item = central_db.query(models.Inventory).filter(
-                models.Inventory.warehouse_id == b_item.warehouse_id,
-                models.Inventory.medicine_id == b_item.medicine_id
-            ).first()
-            
-            if not c_item:
-                # 理论上 seed_data 保证了一致，这里是防止意外
-                continue
-
-            # =================================================
-            # 策略 A: 处理 "我自己的" 仓库数据 (Read-Write)
-            # =================================================
-            if b_item.warehouse_id == my_warehouse_id:
-                # 1. 正常上传: 我比总院新 -> 更新总院
-                if b_item.last_updated > c_item.last_updated:
-                    c_item.quantity = b_item.quantity
-                    c_item.last_updated = b_item.last_updated
-                    print(f"⬆️ [上传] {branch_cn_name}更新了自家库存 -> 同步到总院 (ID: {b_item.id})")
-                
-                # 2. 冲突检测: 总院竟然比我还新? -> 报警
-                elif c_item.last_updated > b_item.last_updated:
-                    if c_item.quantity != b_item.quantity:
-                        reason = f"冲突! {branch_cn_name}自家库存被总院修改. 本地:{b_item.quantity} vs 远端:{c_item.quantity}"
-                        print(f"⚠️ {reason}")
-                        log_conflict(central_db, "inventory", b_item.id, branch_db_name, "mssql", reason)
-
-            # =================================================
-            # 策略 B: 处理 "别人的" 仓库数据 (Read-Only)
-            # =================================================
-            else:
-                # 逻辑: 无条件信任总院 (因为那是别人改的，经过总院传过来的)
-                if c_item.last_updated > b_item.last_updated:
-                    # 更新本地的分院数据库
-                    b_item.quantity = c_item.quantity
-                    b_item.last_updated = c_item.last_updated
-                    # 注意：这里需要 commit branch_db
-                    branch_db.commit() 
-                    print(f"⬇️ [下载] {branch_cn_name}同步了其他分院数据 (Warehouse {b_item.warehouse_id})")
-
-        # 提交对总院的修改
-        central_db.commit()
-        
-    except Exception as e:
-        print(f"❌ 同步出错: {e}")
-        central_db.rollback()
-        branch_db.rollback()
+        if not exists:
+            print(f"📧 [冲突报警] {reason}")
+            conflict = models.SyncConflictLog(
+                table_name=table,
+                record_id=record_id,
+                source_db=owner_db,
+                target_db=intruder_db,
+                conflict_reason=reason,
+                status='PENDING'
+            )
+            mssql.add(conflict)
+            mssql.commit()
     finally:
-        branch_db.close()
-        central_db.close()
+        mssql.close()
+
+def models_are_equal(obj1, obj2, model_class):
+    mapper = inspect(model_class)
+    for column in mapper.attrs:
+        prop_name = column.key
+        if prop_name == 'last_updated': continue
+        if getattr(obj1, prop_name) != getattr(obj2, prop_name):
+            return False
+    return True
+
+def sync_logic():
+    """
+    全网广播式同步逻辑
+    """
+    # 遍历所有数据库作为 'Source'
+    for source_db_name in ALL_DBS:
+        source_session = get_db_session(source_db_name)
+        try:
+            # 1. 同步 Inventory
+            items = source_session.query(models.Inventory).all()
+            for item in items:
+                # 判断这个 item 是不是 source_db 拥有的
+                # 如果 source_db 是 mysql，它只负责 warehouse_id=1 的数据
+                owner_db = OWNER_MAP.get(item.warehouse_id)
+                
+                # 情况 A: 我是 Owner (我是源头)
+                if owner_db == source_db_name:
+                    # 遍历其他所有数据库，把我的数据推过去
+                    for target_db_name in ALL_DBS:
+                        if target_db_name == source_db_name: continue
+                        
+                        target_session = get_db_session(target_db_name)
+                        try:
+                            target_item = target_session.query(models.Inventory).filter(models.Inventory.id == item.id).first()
+                            
+                            if not target_item:
+                                # 目标没有 -> 插入
+                                new_data = {c.key: getattr(item, c.key) for c in inspect(models.Inventory).attrs}
+                                target_session.add(models.Inventory(**new_data))
+                                print(f"➕ [广播] {source_db_name} -> {target_db_name} (新增 ID:{item.id})")
+                            
+                            elif item.last_updated > target_item.last_updated:
+                                # 我比目标新 -> 覆盖目标
+                                if not models_are_equal(item, target_item, models.Inventory):
+                                    for c in inspect(models.Inventory).attrs:
+                                        setattr(target_item, c.key, getattr(item, c.key))
+                                    print(f"⬆️ [广播] {source_db_name} -> {target_db_name} (更新 ID:{item.id})")
+                                else:
+                                    target_item.last_updated = item.last_updated # 静默同步时间
+                            
+                            elif target_item.last_updated > item.last_updated:
+                                # 目标比我还新？-> 冲突！(有人改了副本)
+                                if not models_are_equal(item, target_item, models.Inventory):
+                                    reason = f"冲突! {source_db_name}拥有ID:{item.id}写权限，但在 {target_db_name} 发现更新的数据。"
+                                    log_conflict("inventory", item.id, source_db_name, target_db_name, reason)
+                                    
+                            target_session.commit()
+                        except Exception:
+                            target_session.rollback()
+                        finally:
+                            target_session.close()
+
+            # 2. 同步 Users (逻辑同上，只是归属权字段不同)
+            users = source_session.query(models.User).all()
+            for u in users:
+                owner_db = USER_OWNER_MAP.get(u.branch_id)
+                
+                if owner_db == source_db_name:
+                    for target_db_name in ALL_DBS:
+                        if target_db_name == source_db_name: continue
+                        target_session = get_db_session(target_db_name)
+                        try:
+                            target_u = target_session.query(models.User).filter(models.User.id == u.id).first()
+                            if not target_u:
+                                new_data = {c.key: getattr(u, c.key) for c in inspect(models.User).attrs}
+                                target_session.add(models.User(**new_data))
+                                print(f"➕ [广播] {source_db_name} -> {target_db_name} (新用户:{u.username})")
+                            elif u.last_updated > target_u.last_updated:
+                                if not models_are_equal(u, target_u, models.User):
+                                    for c in inspect(models.User).attrs:
+                                        setattr(target_u, c.key, getattr(u, c.key))
+                                    print(f"⬆️ [广播] {source_db_name} -> {target_db_name} (更新用户:{u.username})")
+                                else:
+                                    target_u.last_updated = u.last_updated
+                            elif target_u.last_updated > u.last_updated:
+                                if not models_are_equal(u, target_u, models.User):
+                                    reason = f"冲突! 用户 {u.username} 归属 {source_db_name}，但在 {target_db_name} 被修改。"
+                                    log_conflict("users", u.id, source_db_name, target_db_name, reason)
+                            target_session.commit()
+                        except:
+                            target_session.rollback()
+                        finally:
+                            target_session.close()
+
+        finally:
+            source_session.close()
 
 def start_sync_job():
-    # MySQL 是第一分院，只负责 Warehouse ID = 1
-    scheduler.add_job(sync_branch_logic, 'interval', seconds=5, args=["mysql", "第一分院", 1])
-    
-    # PG 是第二分院，只负责 Warehouse ID = 2
-    scheduler.add_job(sync_branch_logic, 'interval', seconds=5, args=["pg", "第二分院", 2])
-    
+    scheduler.add_job(sync_logic, 'interval', seconds=10)
     scheduler.start()
-    print("🚀 全量同步引擎已启动 (策略：权限分离 + 中央汇聚)...")
+    print("🚀 全网广播同步引擎已启动...")

@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware  # 【关键缺失】
 from contextlib import asynccontextmanager
-from .routers import analysis, medicine, conflict, auth, business
+from .routers import analysis, medicine, conflict, auth, business, users
 from .sync_engine import start_sync_job, scheduler
 
 @asynccontextmanager
@@ -33,6 +33,7 @@ app.include_router(analysis.router)
 app.include_router(medicine.router)
 app.include_router(conflict.router)
 app.include_router(business.router)
+app.include_router(users.router)
 
 @app.get("/")
 def root():

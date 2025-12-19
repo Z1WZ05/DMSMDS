@@ -19,13 +19,15 @@ class Warehouse(Base):
     location = Column(Unicode(200))
 
 class User(Base):
-    """【新增】用户表"""
+    """用户表 (增加 last_updated 用于同步)"""
     __tablename__ = 'users'
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String(50), unique=True, nullable=False)
     password = Column(String(100), nullable=False)
     role = Column(String(20), nullable=False)
     branch_id = Column(Integer, ForeignKey('warehouses.id'), nullable=False)
+    # 【新增】用于同步的时间戳
+    last_updated = Column(DateTime, default=func.now(), onupdate=func.now())
 
 class Inventory(Base):
     __tablename__ = 'inventory'
