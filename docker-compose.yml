@@ -1,7 +1,6 @@
 version: '3.8'
 
 services:
-  # 1. MySQL (模拟分院 A)
   db_mysql:
     image: mysql:8.0
     container_name: medical_mysql
@@ -9,14 +8,14 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: RootPassword123!
       MYSQL_DATABASE: region_a_db
-      TZ: Asia/Shanghai  # 【修改】设置时区
+      TZ: Asia/Shanghai # 设置时区
     ports:
       - "33061:3306"
     volumes:
       - ./data/mysql:/var/lib/mysql
-    command: --default-authentication-plugin=mysql_native_password
+      - /etc/localtime:/etc/localtime:ro # 同步宿主机时间
+    command: --default-authentication-plugin=mysql_native_password --max_allowed_packet=64M
 
-  # 2. PostgreSQL (模拟分院 B)
   db_pg:
     image: postgres:14
     container_name: medical_pg
@@ -25,13 +24,13 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: RootPassword123!
       POSTGRES_DB: region_b_db
-      TZ: Asia/Shanghai  # 【修改】设置时区
+      TZ: Asia/Shanghai
     ports:
       - "5432:5432"
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
+      - /etc/localtime:/etc/localtime:ro
 
-  # 3. SQL Server (模拟集团总库)
   db_mssql:
     image: mcr.microsoft.com/mssql/server:2019-latest
     container_name: medical_mssql
@@ -39,11 +38,41 @@ services:
     environment:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: RootPassword123!
-      TZ: Asia/Shanghai  # 【修改】设置时区
+      TZ: Asia/Shanghai
     ports:
       - "14330:1433"
     volumes:
       - mssql_data:/var/opt/mssql
+      - /etc/localtime:/etc/localtime:ro
+
+  backend:
+    build: ./backend
+    container_name: medical_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - IS_DOCKER=true
+      - TZ=Asia/Shanghai
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - db_mysql
+      - db_pg
+      - db_mssql
+
+  frontend:
+    build: ./frontend
+    container_name: medical_frontend
+    restart: always
+    ports:
+      - "80:80"
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - backend
 
 volumes:
   mssql_data:

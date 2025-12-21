@@ -9,7 +9,15 @@
 
     <el-table :data="prescriptions" border stripe style="width: 100%" v-loading="loading">
       <el-table-column prop="prescription_no" label="处方单号" width="220" />
-      <el-table-column prop="patient_name" label="病人姓名" width="120" />
+      <el-table-column prop="patient_name" label="病人姓名" width="100" />
+      
+      <!-- 【修改点】新增开方医生列 -->
+      <el-table-column prop="doctor_name" label="开方医生" width="120">
+        <template #default="scope">
+          <el-tag effect="plain">{{ scope.row.doctor_name || '未知' }}</el-tag>
+        </template>
+      </el-table-column>
+
       <el-table-column prop="total_amount" label="总金额" width="100">
         <template #default="scope">
           <span style="color: #67C23A; font-weight: bold;">¥{{ scope.row.total_amount }}</span>
@@ -26,7 +34,6 @@
         </template>
       </el-table-column>
       
-      <!-- 新增：详情按钮 -->
       <el-table-column label="操作" width="100">
         <template #default="scope">
           <el-button type="primary" link @click="openDetail(scope.row)">查看详情</el-button>
@@ -39,7 +46,8 @@
       <el-descriptions :column="2" border>
         <el-descriptions-item label="处方号">{{ currentPres.prescription_no }}</el-descriptions-item>
         <el-descriptions-item label="病人">{{ currentPres.patient_name }}</el-descriptions-item>
-        <el-descriptions-item label="开具时间">{{ new Date(currentPres.create_time).toLocaleString() }}</el-descriptions-item>
+        <!-- 【修改点】详情里也显示医生 -->
+        <el-descriptions-item label="医生">{{ currentPres.doctor_name }}</el-descriptions-item>
         <el-descriptions-item label="总金额">¥{{ currentPres.total_amount }}</el-descriptions-item>
       </el-descriptions>
       <br>
@@ -89,7 +97,7 @@ const fetchData = async () => {
 const openDetail = async (row) => {
   currentPres.value = row
   detailVisible.value = true
-  detailItems.value = [] // 先清空
+  detailItems.value = [] // 清空旧数据
   try {
     const token = localStorage.getItem('token')
     const res = await axios.get(`http://127.0.0.1:8000/business/prescription/${row.id}/items`, {

@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+sqlalchemy
+pymysql
+psycopg2-binary
+pymssql
+python-jose[cryptography]
+python-multipart
+passlib[bcrypt]
+apscheduler

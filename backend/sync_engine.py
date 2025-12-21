@@ -1,146 +1,220 @@
 import time
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.orm import Session
-from sqlalchemy import inspect
+from sqlalchemy import inspect, and_
+from datetime import datetime
 from .database import SessionLocals
 from . import models
+from .config import settings
+from .utils import send_conflict_email
 
 scheduler = BackgroundScheduler()
 
-# 定义所有数据库节点
 ALL_DBS = ["mysql", "pg", "mssql"]
-
-# 定义数据归属 (ID -> 负责的 DB Name)
-# 1=分院1(MySQL), 2=分院2(PG), 3=总院(MSSQL)
-OWNER_MAP = {
-    1: "mysql", 
-    2: "pg",    
-    3: "mssql"  
-}
+OWNER_MAP = {1: "mysql", 2: "pg", 3: "mssql"}
+CLOCK_SKEW_TOLERANCE = 2
 
 def get_db_session(db_name):
     return SessionLocals[db_name]()
 
-def log_conflict(table, record_id, owner_db, intruder_db, reason):
-    """记录冲突到总库"""
-    mssql = SessionLocals["mssql"]()
+def is_record_locked(table_name, record_id):
+    """检查记录是否处于冲突锁定状态"""
+    db = SessionLocals["mssql"]()
     try:
-        exists = mssql.query(models.SyncConflictLog).filter(
-            models.SyncConflictLog.record_id == record_id,
-            models.SyncConflictLog.table_name == table,
-            models.SyncConflictLog.status == 'PENDING'
+        conflict = db.query(models.SyncConflictLog).filter(
+            and_(
+                models.SyncConflictLog.table_name == table_name,
+                models.SyncConflictLog.record_id == str(record_id),
+                models.SyncConflictLog.status == 'PENDING'
+            )
+        ).first()
+        return conflict is not None
+    finally:
+        db.close()
+
+def update_daily_stats(stat_type: str):
+    """
+    更新每日统计指标：'auto', 'conflict', 'resolve'
+    """
+    db = SessionLocals["mssql"]() # 统计统一存在总库
+    today = datetime.now().strftime('%Y-%m-%d')
+    try:
+        stat = db.query(models.SyncStats).filter(models.SyncStats.sync_date == today).first()
+        if not stat:
+            stat = models.SyncStats(sync_date=today, auto_sync_count=0, conflict_count=0, manual_resolve_count=0)
+            db.add(stat)
+        
+        if stat_type == 'auto': stat.auto_sync_count += 1
+        elif stat_type == 'conflict': stat.conflict_count += 1
+        elif stat_type == 'resolve': stat.manual_resolve_count += 1
+        
+        db.commit()
+    except Exception as e:
+        print(f"统计更新失败: {e}")
+    finally:
+        db.close()
+
+def log_conflict(table, record_id, owner_db, intruder_db, diff_msg):
+    """记录冲突并触发邮件报警"""
+    db = SessionLocals["mssql"]()
+    try:
+        exists = db.query(models.SyncConflictLog).filter(
+            and_(
+                models.SyncConflictLog.table_name == table,
+                models.SyncConflictLog.record_id == str(record_id),
+                models.SyncConflictLog.status == 'PENDING'
+            )
         ).first()
         
         if not exists:
-            print(f"📧 [冲突报警] {reason}")
+            print(f"📧 [发现冲突] {table}:{record_id} -> {diff_msg}")
             conflict = models.SyncConflictLog(
                 table_name=table,
-                record_id=record_id,
+                record_id=str(record_id),
                 source_db=owner_db,
                 target_db=intruder_db,
-                conflict_reason=reason,
+                conflict_reason=diff_msg, # 存储详细的 [字段:旧 vs 新]
                 status='PENDING'
             )
-            mssql.add(conflict)
-            mssql.commit()
+            db.add(conflict)
+            db.commit()
+            update_daily_stats('conflict') # 【新增】
+            # 触发邮件通知
+            try:
+                send_conflict_email(table, record_id, diff_msg)
+            except Exception as mail_err:
+                print(f"邮件发送失败: {mail_err}")
     finally:
-        mssql.close()
+        db.close()
 
-def models_are_equal(obj1, obj2, model_class):
-    """比较内容是否一致 (忽略时间戳)"""
+def get_model_diff_str(obj1, obj2, model_class, source_db, target_db):
+    """
+    【核心修复】获取差异描述字符串。
+    1. 自动处理 PG ID 偏移。
+    2. 只有内容真正不一致时才返回描述。
+    """
     mapper = inspect(model_class)
+    diffs = []
     for column in mapper.attrs:
         prop_name = column.key
-        if prop_name == 'last_updated': continue
-        # 对于外键对象等特殊字段跳过
-        if prop_name.startswith('_'): continue
+        if prop_name in ['last_updated', 'create_time'] or prop_name.startswith('_'): 
+            continue
         
-        val1 = getattr(obj1, prop_name)
-        val2 = getattr(obj2, prop_name)
-        if val1 != val2:
-            return False
-    return True
+        v1 = getattr(obj1, prop_name)
+        v2 = getattr(obj2, prop_name)
+
+        # 处理 medicine_id 偏移补偿比对
+        if prop_name == 'medicine_id':
+            if source_db != 'pg' and target_db == 'pg':
+                if v1 is not None: v1 += 253
+            elif source_db == 'pg' and target_db != 'pg':
+                if v1 is not None: v1 -= 253
+
+        # 执行比对
+        is_different = False
+        if isinstance(v1, float) and isinstance(v2, float):
+            if abs(v1 - v2) > 0.001: is_different = True
+        elif v1 != v2:
+            is_different = True
+        
+        if is_different:
+            diffs.append(f"{prop_name}:[{v1} vs {v2}]")
+            
+    return ", ".join(diffs) if diffs else None
+
+def get_owner_db(item, source_db_name):
+    owner_id = getattr(item, 'branch_id', getattr(item, 'warehouse_id', -1))
+    if hasattr(item, 'prescription_id'):
+        if source_db_name == 'mysql': owner_id = 1
+        elif source_db_name == 'pg': owner_id = 2
+        else: owner_id = 3
+    return OWNER_MAP.get(owner_id)
 
 def sync_logic():
-    """
-    【核心】全网广播同步引擎
-    遍历核心业务表，自动识别数据归属，进行广播或冲突检测
-    """
-    # 定义需要同步的模型列表
-    # 注意：PrescriptionItem 作为子表，通常随主表查询，但为了简单这里也独立同步
-    sync_models = [models.User, models.Inventory, models.Prescription, models.PrescriptionItem]
+    sync_models = [models.User, models.Inventory, models.Prescription, models.PrescriptionItem, models.AlertMessage]
 
     for model_class in sync_models:
         table_name = model_class.__tablename__
-        
-        # 遍历所有数据库作为 '潜在源头'
         for source_db_name in ALL_DBS:
             source_session = get_db_session(source_db_name)
             try:
-                # 取出该库所有数据
                 items = source_session.query(model_class).all()
-                
                 for item in items:
-                    # 1. 判断数据归属权
-                    owner_id = -1
-                    if hasattr(item, 'branch_id'):
-                        owner_id = item.branch_id
-                    elif hasattr(item, 'warehouse_id'):
-                        owner_id = item.warehouse_id
-                    elif hasattr(item, 'prescription_id'):
-                        # 子表归属权稍微复杂点，暂且认为是跟随主表的 warehouse_id
-                        # 为简化实验，假设子表不冲突，或者通过 PRESCRIPTION_ID 的前缀/关联查询判断
-                        # 这里做一个简化：如果当前库是 mysql，就认为它拥有的子表也是 mysql 的 (仅用于演示)
-                        # 更严谨的做法是 join 主表查 warehouse_id，但太复杂。
-                        # 我们利用 DB_URLS 的映射逻辑：如果是在 mysql 库里查到的，暂且当做它是源
-                        owner_id = 1 if source_db_name == 'mysql' else (2 if source_db_name == 'pg' else 3)
-                    
-                    owner_db = OWNER_MAP.get(owner_id)
+                    if is_record_locked(table_name, item.id): continue
 
-                    # 2. 如果当前数据库 就是 数据的拥有者 (Owner)
-                    if owner_db == source_db_name:
-                        # 向其他所有数据库广播
-                        for target_db_name in ALL_DBS:
-                            if target_db_name == source_db_name: continue
+                    owner_db = get_owner_db(item, source_db_name)
+                    if owner_db != source_db_name: continue 
+
+                    for target_db_name in ALL_DBS:
+                        if target_db_name == source_db_name: continue
+                        target_session = get_db_session(target_db_name)
+                        try:
+                            target_item = target_session.query(model_class).filter(model_class.id == item.id).first()
                             
-                            target_session = get_db_session(target_db_name)
-                            try:
-                                target_item = target_session.query(model_class).filter(model_class.id == item.id).first()
-                                
-                                if not target_item:
-                                    # [新增广播]
-                                    new_data = {c.key: getattr(item, c.key) for c in inspect(model_class).attrs if c.key != 'id'}
-                                    # 显式设置ID以保持一致
-                                    new_obj = model_class(id=item.id, **new_data)
-                                    target_session.add(new_obj)
-                                    print(f"➕ [同步] {table_name}:{item.id} {source_db_name}->{target_db_name}")
-                                
-                                elif item.last_updated > target_item.last_updated:
-                                    # [更新广播]
-                                    if not models_are_equal(item, target_item, model_class):
-                                        for c in inspect(model_class).attrs:
-                                            if c.key != 'id':
-                                                setattr(target_item, c.key, getattr(item, c.key))
-                                        print(f"⬆️ [更新] {table_name}:{item.id} {source_db_name}->{target_db_name}")
-                                    else:
-                                        target_item.last_updated = item.last_updated # 静默同步时间
-                                
-                                elif target_item.last_updated > item.last_updated:
-                                    # [逆向冲突] 目标库(非Owner)竟然比源库(Owner)还新
-                                    if not models_are_equal(item, target_item, model_class):
-                                        reason = f"冲突! {source_db_name}拥有{table_name}:{item.id}权限，但在 {target_db_name} 发现修改。"
-                                        log_conflict(table_name, item.id, source_db_name, target_db_name, reason)
-                                
+                            if not target_item:
+                                # [新增同步]
+                                new_data = {c.key: getattr(item, c.key) for c in inspect(model_class).attrs if c.key != 'id'}
+                                if target_db_name == 'pg' and 'medicine_id' in new_data:
+                                    new_data['medicine_id'] += 253
+                                target_session.add(model_class(id=item.id, **new_data))
                                 target_session.commit()
-                            except Exception:
-                                target_session.rollback()
-                            finally:
-                                target_session.close()
+                                # 时间戳对齐
+                                t_ref = target_session.query(model_class).filter(model_class.id == item.id).first()
+                                if t_ref:
+                                    t_ref.last_updated = item.last_updated
+                                    target_session.commit()
+                                update_daily_stats('auto') # 统计自动同步
+                            else:
+                                # 【核心调用修复】获取详细的差异字符串
+                                diff_str = get_model_diff_str(item, target_item, model_class, source_db_name, target_db_name)
+                                
+                                # 情况 2: Owner 时间领先 (正常更新)
+                                if item.last_updated > target_item.last_updated:
+                                    if diff_str:
+                                        # 内容真的有变，执行更新
+                                        for c in inspect(model_class).attrs:
+                                            if c.key != 'id': 
+                                                val = getattr(item, c.key)
+                                                if target_db_name == 'pg' and c.key == 'medicine_id': val += 253
+                                                setattr(target_item, c.key, val)
+                                        target_session.commit()
+                                        print(f"⬆️ [更新] {table_name}:{str(item.id)[:8]} {source_db_name}->{target_db_name} | {diff_str}")
+                                    else:
+                                        # 仅时间偏移，静默对齐
+                                        target_item.last_updated = item.last_updated
+                                        target_session.commit()
+                                    
+                                    update_daily_stats('auto') # 统计自动同步
+                                
+                                # 情况 3: Target 时间领先 (潜在冲突)
+                                elif target_item.last_updated > item.last_updated:
+                                    if diff_str:
+                                        delta = (target_item.last_updated - item.last_updated).total_seconds()
+                                        if delta < CLOCK_SKEW_TOLERANCE:
+                                            # 时钟纠偏
+                                            for c in inspect(model_class).attrs:
+                                                if c.key != 'id':
+                                                    val = getattr(item, c.key)
+                                                    if target_db_name == 'pg' and c.key == 'medicine_id': val += 253
+                                                    setattr(target_item, c.key, val)
+                                            target_item.last_updated = item.last_updated
+                                            target_session.commit()
+                                        else:
+                                            # 【核心修复】传入详细的 diff_str 供邮件发送
+                                            log_conflict(table_name, item.id, source_db_name, target_db_name, diff_str)
+                        except Exception:
+                            target_session.rollback()
+                        finally:
+                            target_session.close()
             finally:
                 source_session.close()
 
+def scheduled_task():
+    # 【关键修复】每轮执行前刷新配置，确保 SMTP 参数最新
+    settings.refresh()
+    if settings.SCHEDULED_SYNC: 
+        sync_logic()
+
 def start_sync_job():
-    # 只需要添加这一个任务，它会自己循环处理所有表
-    scheduler.add_job(sync_logic, 'interval', seconds=10)
+    scheduler.add_job(scheduled_task, 'interval', seconds=settings.SYNC_INTERVAL, id='sync_job_id', max_instances=3, coalesce=True)
     scheduler.start()
-    print("🚀 全能同步引擎已启动 (User/Inventory/Prescription)...")

@@ -24,9 +24,15 @@
           <span>冲突监控与处理</span>
         </el-menu-item>
 
-        <el-menu-item index="3" v-if="isAdmin">
-          <el-icon><DataLine /></el-icon>
-          <span>全院数据报表</span>
+        <!-- 菜单部分 -->
+        <el-menu-item index="3">
+          <el-icon><Histogram /></el-icon>
+          <span>业务统计看板</span>
+        </el-menu-item>
+
+        <el-menu-item index="7" v-if="role === 'super_admin'">
+          <el-icon><Setting /></el-icon>
+          <span>系统同步设置</span>
         </el-menu-item>
 
         <el-menu-item index="4" v-if="!isAdmin">
@@ -37,6 +43,22 @@
         <el-menu-item index="5" v-if="isAdmin">
           <el-icon><User /></el-icon>
           <span>系统用户管理</span>
+        </el-menu-item>
+
+        <!-- 菜单部分：新增管理员操作日志菜单 -->
+        <el-menu-item index="8" v-if="role === 'super_admin'">
+          <el-icon><DataBoard /></el-icon>
+          <span>管理员审计日志</span>
+        </el-menu-item>
+
+        <el-menu-item index="9">
+        <el-icon><Management /></el-icon>
+          <span>系统高级中心</span>
+        </el-menu-item>
+
+        <el-menu-item index="10" v-if="isAdmin">
+        <el-icon><Checked /></el-icon>
+          <span>风险预警中心</span>
         </el-menu-item>
 
       </el-menu>
@@ -58,8 +80,11 @@
         <AnalysisView v-if="activeTab === '3'" />
         <MyRecordsView v-if="activeTab === '4'" />
         <UserManagement v-if="activeTab === '5'" />
-        <!-- 新增组件 -->
         <PrescriptionList v-if="activeTab === '6'" />
+        <SettingsView v-if="activeTab === '7'" />
+        <AdminActionsView v-if="activeTab === '8'" />
+        <AdvancedCenter v-if="activeTab === '9'" />
+        <RiskCenter v-if="activeTab === '10'" /> 
       </el-main>
     </el-container>
   </el-container>
@@ -74,6 +99,10 @@ import AnalysisView from '../components/AnalysisView.vue'
 import MyRecordsView from '../components/MyRecordsView.vue'
 import UserManagement from '../components/UserManagement.vue'
 import PrescriptionList from '../components/PrescriptionList.vue' // 引入新组件
+import SettingsView from '../components/SettingsView.vue'
+import AdminActionsView from '../components/AdminActionsView.vue'
+import AdvancedCenter from '../components/AdvancedCenter.vue'
+import RiskCenter from '../components/RiskCenter.vue' // 引入风险预警中心组件
 
 const router = useRouter()
 const activeTab = ref('1')

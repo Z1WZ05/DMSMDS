@@ -1,159 +1,209 @@
 <template>
   <div class="medicine-view">
     <el-row :gutter="20">
-      <!-- 左侧：药品列表 -->
-      <el-col :span="16">
-        <el-card>
+      <!-- 左侧：药品列表区域 (占 16/24 宽度) -->
+      <el-col :span="userRole.includes('admin') ? 24 : 16">
+        <el-card shadow="never">
           <template #header>
             <div class="card-header">
               <div class="title-box">
-                <span>📦 药品库存总览</span>
-                <el-tag v-if="!canSwitchDb" type="info" class="ml-2">
+                <el-icon><Menu /></el-icon>
+                <span class="title-text">药品库存实时总览</span>
+                <el-tag v-if="!canSwitchDb" type="info" class="ml-2" effect="plain">
                   当前院区: {{ currentDbName }}
                 </el-tag>
               </div>
+              
+              <!-- 只有超级管理员(super_admin)才能切换查看其他院区的数据库副本 -->
               <el-select 
                 v-if="canSwitchDb" 
                 v-model="selectedDb" 
                 placeholder="切换院区视图" 
                 @change="fetchData" 
-                style="width: 200px;">
+                style="width: 220px;">
+                <template #prefix>
+                  <el-icon><Monitor /></el-icon>
+                </template>
                 <el-option label="第一分院 (MySQL)" value="mysql" />
-                <el-option label="第二分院 (PG)" value="pg" />
-                <el-option label="总院 (MSSQL)" value="mssql" />
+                <el-option label="第二分院 (PostgreSQL)" value="pg" />
+                <el-option label="集团总院 (SQL Server)" value="mssql" />
               </el-select>
             </div>
           </template>
 
-          <el-table :data="mergedData" stripe style="width: 100%" v-loading="loading">
-            <el-table-column prop="name" label="药品名称" width="150" />
-            <el-table-column prop="category" label="分类" width="100" />
-            <el-table-column prop="price" label="单价" width="80" />
-            <el-table-column prop="quantity" label="库存" width="100">
+          <!-- 药品信息与库存合并表格 -->
+          <el-table :data="mergedData" stripe style="width: 100%" v-loading="loading" border>
+            <el-table-column prop="id" label="ID" width="70" align="center" />
+            <el-table-column prop="name" label="药品名称" min-width="150" />
+            <el-table-column prop="category" label="分类" width="100" align="center" />
+            <el-table-column prop="price" label="单价(元)" width="100" align="right">
+              <template #default="scope">¥{{ scope.row.price.toFixed(2) }}</template>
+            </el-table-column>
+            
+            <el-table-column prop="quantity" label="当前库存" width="120" align="center">
               <template #default="scope">
-                <span :class="{'low-stock': scope.row.quantity < 20}">{{ scope.row.quantity }}</span>
+                <b :class="{'low-stock-text': scope.row.quantity < 20}">{{ scope.row.quantity }}</b>
+                <el-tag size="small" type="danger" v-if="scope.row.quantity < 20" style="margin-left: 5px">紧缺</el-tag>
               </template>
             </el-table-column>
-            <el-table-column prop="danger_level" label="等级" width="100">
+
+            <el-table-column prop="danger_level" label="管控等级" width="130" align="center">
               <template #default="scope">
-                <el-tag :type="getRiskTagType(scope.row.danger_level)" size="small">
+                <el-tag :type="getRiskTagType(scope.row.danger_level)" effect="light">
                   {{ scope.row.danger_level }}
                 </el-tag>
               </template>
             </el-table-column>
             
-            <el-table-column label="操作" min-width="120">
+            <el-table-column label="业务操作" min-width="220" fixed="right">
               <template #default="scope">
-                 <!-- 医护功能：加入清单 -->
+                 <!-- 1. 医护端功能：加入处方清单 -->
                  <el-button 
                    v-if="!userRole.includes('admin')" 
-                   type="success" plain size="small" 
+                   type="primary" size="small" 
                    @click="addToCart(scope.row)">
-                   + 加入清单
+                   <el-icon><Plus /></el-icon> 加入处方
                  </el-button>
                  
-                 <!-- 超管功能：调拨 -->
-                 <el-button 
-                   v-if="userRole === 'super_admin' && selectedDb === 'mssql'" 
-                   type="warning" size="small" 
-                   @click="openAllocationDialog(scope.row)">
-                   调拨
-                 </el-button>
+                 <!-- 2. 超管端功能：仅在总院视图(mssql)下显示调配与入库 -->
+                 <template v-if="userRole === 'super_admin' && selectedDb === 'mssql'">
+                   <el-button 
+                     type="warning" size="small" icon="Connection"
+                     @click="openAllocationDialog(scope.row)">
+                     调配
+                   </el-button>
+                   <el-button 
+                     type="success" size="small" plain icon="Box"
+                     @click="openInboundDialog(scope.row)">
+                     入库
+                   </el-button>
+                 </template>
               </template>
             </el-table-column>
           </el-table>
         </el-card>
       </el-col>
 
-      <!-- 右侧：处方篮 (仅医护可见) -->
+      <!-- 右侧：处方清单篮 (仅医护人员可见) -->
       <el-col :span="8" v-if="!userRole.includes('admin')">
-        <el-card class="cart-card">
+        <el-card class="cart-card" shadow="never">
           <template #header>
             <div class="card-header">
-              <span>📝 待开处方清单</span>
-              <el-tag type="warning" effect="dark">{{ cart.length }} 项</el-tag>
+              <span><el-icon><Notebook /></el-icon> 待开处方清单</span>
+              <el-tag type="warning" effect="dark" round>{{ cart.length }}</el-tag>
             </div>
           </template>
 
           <div v-if="cart.length === 0" class="empty-cart">
-            <el-empty description="暂无药品，请从左侧添加" :image-size="80" />
+            <el-empty description="请从左侧添加药品" :image-size="100" />
           </div>
 
-          <div v-else>
+          <div v-else class="cart-content">
             <div v-for="(item, index) in cart" :key="item.id" class="cart-item">
-              <div class="item-info">
+              <div class="item-main">
                 <div class="item-name">{{ item.name }}</div>
-                <div class="item-price">¥{{ item.price }} × </div>
+                <div class="item-sub">单价: ¥{{ item.price }} | 库存: {{ item.maxStock }}</div>
               </div>
-              <div class="item-action">
-                <el-input-number v-model="item.count" :min="1" :max="item.maxStock" size="small" style="width: 100px" />
-                <el-button type="danger" link size="small" @click="removeFromCart(index)">删除</el-button>
+              <div class="item-ctrl">
+                <el-input-number v-model="item.count" :min="1" :max="item.maxStock" size="small" style="width: 90px" />
+                <el-button type="danger" link icon="Delete" @click="removeFromCart(index)" style="margin-left: 10px"></el-button>
               </div>
             </div>
 
             <div class="cart-footer">
-              <div class="total-price">
-                预估总价: <span>¥{{ cartTotal.toFixed(2) }}</span>
+              <div class="total-row">
+                <span>处方预计金额:</span>
+                <span class="total-val">¥{{ cartTotal.toFixed(2) }}</span>
               </div>
-              <el-button type="primary" class="submit-btn" @click="openPrescribeDialog" size="large">
-                生成处方并结算
+              <el-button type="primary" class="submit-btn" @click="prescribeDialog.visible = true" size="large">
+                生成处方并结算扣库
               </el-button>
+              <el-button type="info" link @click="cart = []" style="width: 100%; margin-top: 10px">清空清单</el-button>
             </div>
           </div>
         </el-card>
       </el-col>
     </el-row>
 
-    <!-- 结算弹窗 -->
-    <el-dialog v-model="prescribeDialog.visible" title="✅ 确认处方信息" width="400px">
-      <el-form label-width="80px">
-        <el-form-item label="病人姓名">
-          <el-input v-model="prescribeDialog.patientName" placeholder="请输入病人真实姓名" />
+    <!-- ========================================== -->
+    <!-- 弹窗集 (Dialogs) -->
+    <!-- ========================================== -->
+
+    <!-- 1. 处方确认弹窗 -->
+    <el-dialog v-model="prescribeDialog.visible" title="📋 处方最终确认" width="450px" destroy-on-close>
+      <el-form label-position="top">
+        <el-form-item label="病人姓名" required>
+          <el-input v-model="prescribeDialog.patientName" placeholder="请录入患者姓名" />
         </el-form-item>
-        <el-divider>药品明细</el-divider>
-        <div v-for="item in cart" :key="item.id" class="dialog-item">
-          <span>{{ item.name }}</span>
-          <span>x {{ item.count }}</span>
+        <div class="dialog-detail">
+          <p class="detail-title">药品明细：</p>
+          <div v-for="item in cart" :key="item.id" class="detail-row">
+            <span>{{ item.name }}</span>
+            <span>x {{ item.count }}</span>
+          </div>
+          <el-divider />
+          <div class="detail-total">
+            应付总额：<b>¥{{ cartTotal.toFixed(2) }}</b>
+          </div>
         </div>
-        <el-divider />
-        <div class="dialog-total">总金额：¥{{ cartTotal.toFixed(2) }}</div>
       </el-form>
       <template #footer>
-        <el-button @click="prescribeDialog.visible = false">取消</el-button>
-        <el-button type="primary" @click="submitPrescription" :loading="submitting">确认提交</el-button>
+        <el-button @click="prescribeDialog.visible = false">返回修改</el-button>
+        <el-button type="primary" @click="submitPrescription" :loading="submitting">确认提交 (跨库同步)</el-button>
       </template>
     </el-dialog>
 
-    <!-- 调拨弹窗 (已升级：支持任意库之间调拨) -->
-    <el-dialog v-model="allocDialog.visible" title="🚚 全网物资调拨指令" width="450px">
-      <el-form label-width="80px">
+    <!-- 2. 全网物资调拨弹窗 -->
+    <el-dialog v-model="allocDialog.visible" title="🚚 全网物资调拨指令" width="480px">
+      <el-form label-width="100px">
         <el-form-item label="调拨药品">
-          <el-input v-model="allocDialog.medicineName" disabled />
+          <el-input v-model="allocDialog.medicine_name" disabled />
         </el-form-item>
-        
-        <el-form-item label="调出仓库">
-          <el-select v-model="allocDialog.sourceBranchId" placeholder="选择发货方">
+        <el-form-item label="发货方(源)">
+          <el-select v-model="allocDialog.source_branch_id" style="width: 100%">
             <el-option label="第一分院 (MySQL)" :value="1" />
             <el-option label="第二分院 (PostgreSQL)" :value="2" />
             <el-option label="集团总库 (MSSQL)" :value="3" />
           </el-select>
         </el-form-item>
-
-        <el-form-item label="调入仓库">
-          <el-select v-model="allocDialog.targetBranchId" placeholder="选择接收方">
+        <el-form-item label="接收方(目标)">
+          <el-select v-model="allocDialog.target_branch_id" style="width: 100%">
             <el-option label="第一分院 (MySQL)" :value="1" />
             <el-option label="第二分院 (PostgreSQL)" :value="2" />
             <el-option label="集团总库 (MSSQL)" :value="3" />
           </el-select>
         </el-form-item>
-        
         <el-form-item label="调拨数量">
-          <el-input-number v-model="allocDialog.quantity" :min="1" />
+          <el-input-number v-model="allocDialog.quantity" :min="1" style="width: 100%" />
         </el-form-item>
+        <el-alert title="注意：此操作将直接修改总院记录的时间戳，触发全网冲突报警，需管理员人工仲裁。" type="warning" :closable="false" show-icon />
       </el-form>
       <template #footer>
         <el-button @click="allocDialog.visible = false">取消</el-button>
-        <el-button type="warning" @click="submitAllocation" :loading="submitting">确认调拨</el-button>
+        <el-button type="warning" @click="submitAllocation" :loading="submitting">下达调拨指令</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 3. 集团物资入库弹窗 -->
+    <el-dialog v-model="inboundDialog.visible" title="📦 集团物资采购入库" width="400px">
+      <el-form label-width="100px">
+        <el-form-item label="入库药品">
+          <el-input v-model="inboundDialog.medicine_name" disabled />
+        </el-form-item>
+        <el-form-item label="入库院区">
+          <el-select v-model="inboundDialog.warehouse_id" style="width: 100%">
+            <el-option label="第一分院 (MySQL)" :value="1" />
+            <el-option label="第二分院 (PostgreSQL)" :value="2" />
+            <el-option label="集团总库 (MSSQL)" :value="3" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="入库数量">
+          <el-input-number v-model="inboundDialog.quantity" :min="1" style="width: 100%" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="inboundDialog.visible = false">取消</el-button>
+        <el-button type="success" @click="submitInbound" :loading="submitting">确认入库并记账</el-button>
       </template>
     </el-dialog>
 
@@ -163,34 +213,47 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
 import axios from 'axios'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus, Delete, Menu, Monitor, Notebook } from '@element-plus/icons-vue'
 
+// --- 用户状态与权限控制 ---
 const userRole = localStorage.getItem('role') || ''
 const userDb = localStorage.getItem('db_name') || 'mysql'
 const canSwitchDb = computed(() => userRole === 'super_admin')
+// 如果是普通医生，selectedDb 永远锁定在自己的 db；如果是超管，默认看 mssql
 const selectedDb = ref(canSwitchDb.value ? 'mssql' : userDb)
 
+const dbNames = { 
+  'mysql': '第一分院 (MySQL)', 
+  'pg': '第二分院 (PostgreSQL)', 
+  'mssql': '集团总院 (SQL Server)' 
+}
+const currentDbName = computed(() => dbNames[selectedDb.value])
+
+// --- 基础状态变量 ---
 const medicines = ref([])
 const inventoryMap = ref({})
 const loading = ref(false)
 const submitting = ref(false)
 
-// 购物车数据
+// --- 处方购物车逻辑 ---
 const cart = ref([])
-
-const prescribeDialog = ref({ visible: false, patientName: '' })
-const allocDialog = ref({ 
-  visible: false, 
-  medicineId: 0, 
-  medicineName: '', 
-  sourceBranchId: 3, // 默认源为总库
-  targetBranchId: 1, 
-  quantity: 10 
+const cartTotal = computed(() => {
+  return cart.value.reduce((sum, item) => sum + item.price * item.count, 0)
 })
 
-const dbNames = { 'mysql': '第一分院 (MySQL)', 'pg': '第二分院 (PostgreSQL)', 'mssql': '集团总院 (SQL Server)' }
-const currentDbName = computed(() => dbNames[selectedDb.value])
+// --- 弹窗对象定义 ---
+const prescribeDialog = ref({ visible: false, patientName: '' })
+const allocDialog = ref({ 
+  visible: false, medicine_id: 0, medicine_name: '', 
+  source_branch_id: 3, target_branch_id: 1, quantity: 10 
+})
+const inboundDialog = ref({ 
+  visible: false, medicine_id: 0, medicine_name: '', 
+  warehouse_id: 3, quantity: 100 
+})
 
+// --- 合并库存数据到药品列表 ---
 const mergedData = computed(() => {
   return medicines.value.map(med => ({
     ...med,
@@ -198,42 +261,49 @@ const mergedData = computed(() => {
   }))
 })
 
-const cartTotal = computed(() => {
-  return cart.value.reduce((sum, item) => sum + item.price * item.count, 0)
-})
-
+// --- 辅助：危险等级标签颜色 ---
 const getRiskTagType = (level) => {
   if (level.includes('急救')) return 'danger'
   if (level === '处方药') return 'warning'
   return 'success'
 }
 
+// --- 方法：从后端拉取全量数据 ---
 const fetchData = async () => {
   loading.value = true
   try {
-    const resMed = await axios.get(`http://127.0.0.1:8000/medicines/${selectedDb.value}`)
+    const token = localStorage.getItem('token')
+    const headers = { Authorization: `Bearer ${token}` }
+    
+    const [resMed, resInv] = await Promise.all([
+      axios.get(`http://127.0.0.1:8000/medicines/${selectedDb.value}`, { headers }),
+      axios.get(`http://127.0.0.1:8000/business/stock/${selectedDb.value}`, { headers })
+    ])
+    
     medicines.value = resMed.data
-    const resInv = await axios.get(`http://127.0.0.1:8000/business/stock/${selectedDb.value}`)
     const map = {}
     resInv.data.forEach(item => { map[item.medicine_id] = item.quantity })
     inventoryMap.value = map
   } catch (error) {
-    ElMessage.error('数据加载失败')
+    console.error(error)
+    ElMessage.error('库存同步状态获取失败，请检查数据库连接')
   } finally {
     loading.value = false
   }
 }
 
-// 加入清单
+// --- 购物车操作 ---
 const addToCart = (row) => {
-  if (row.quantity <= 0) return ElMessage.warning('库存不足')
+  if (row.quantity <= 0) {
+    return ElMessage.error('当前院区该药品已断货，请联系管理部调配')
+  }
   
   const existingItem = cart.value.find(item => item.id === row.id)
   if (existingItem) {
     if (existingItem.count < row.quantity) {
       existingItem.count++
     } else {
-      ElMessage.warning('已达到最大库存限制')
+      ElMessage.warning('已达到当前最大库存量')
     }
   } else {
     cart.value.push({
@@ -250,73 +320,76 @@ const removeFromCart = (index) => {
   cart.value.splice(index, 1)
 }
 
-const openPrescribeDialog = () => {
-  if (cart.value.length === 0) return ElMessage.warning('请先选择药品')
-  prescribeDialog.value.visible = true
-}
+// --- 业务提交方法 ---
 
-// 提交处方
+// 1. 提交处方结算 (核心业务)
 const submitPrescription = async () => {
-  if (!prescribeDialog.value.patientName) return ElMessage.warning('请输入病人姓名')
+  if (!prescribeDialog.value.patientName) return ElMessage.warning('必须录入患者姓名')
   
   submitting.value = true
   try {
     const token = localStorage.getItem('token')
-    
-    const itemsPayload = cart.value.map(item => ({
-      medicine_id: item.id,
-      quantity: item.count
-    }))
-
     const payload = {
       patient_name: prescribeDialog.value.patientName,
-      items: itemsPayload
+      items: cart.value.map(item => ({ 
+        medicine_id: item.id, 
+        quantity: item.count 
+      }))
     }
+
+    if (cartTotal.value > 2000) {
+      try {
+          await ElMessageBox.confirm(
+              `当前处方金额 (¥${cartTotal.value.toFixed(2)}) 已触发系统自动审计阈值。开具该处方将被数据库触发器实时记录在案。是否确认开具？`,
+              '高额处方风险警告',
+              {
+                  confirmButtonText: '本人确认并开具',
+                  cancelButtonText: '返回修改',
+                  type: 'error',
+                  center: true
+              }
+          )
+      } catch {
+          return; // 用户取消，直接返回
+      }
+  }
     
     await axios.post('http://127.0.0.1:8000/business/prescription/create', payload, {
       headers: { Authorization: `Bearer ${token}` }
     })
     
-    ElMessage.success('处方开具成功！')
+    ElMessage.success('处方已成功下达并完成库存扣减')
     prescribeDialog.value.visible = false
-    cart.value = [] // 清空购物车
-    fetchData() // 刷新库存
+    prescribeDialog.value.patientName = ''
+    cart.value = [] // 结算后清空购物车
+    fetchData() // 刷新本地库存
   } catch (e) {
-    ElMessage.error(e.response?.data?.detail || '开药失败')
+    ElMessage.error(e.response?.data?.detail || '处方提交失败，请检查权限或库存')
   } finally {
     submitting.value = false
   }
 }
 
-// 打开调拨弹窗
+// 2. 提交调拨指令 (超管)
 const openAllocationDialog = (row) => {
   allocDialog.value = { 
-    visible: true, 
-    medicineId: row.id, 
-    medicineName: row.name, 
-    sourceBranchId: 3, 
-    targetBranchId: 1, 
-    quantity: 10 
+    visible: true, medicine_id: row.id, medicine_name: row.name, 
+    source_branch_id: 3, target_branch_id: 1, quantity: 10 
   }
 }
 
-// 提交调拨
 const submitAllocation = async () => {
-  if(allocDialog.value.sourceBranchId === allocDialog.value.targetBranchId) {
-    return ElMessage.warning('源仓库和目标仓库不能相同')
+  if (allocDialog.value.source_branch_id === allocDialog.value.target_branch_id) {
+    return ElMessage.warning('源仓和目标仓不能相同')
   }
-
+  
   submitting.value = true
   try {
     const token = localStorage.getItem('token')
-    await axios.post('http://127.0.0.1:8000/business/allocation/create', {
-      medicine_id: allocDialog.value.medicineId,
-      source_branch_id: allocDialog.value.sourceBranchId, // 新增参数
-      target_branch_id: allocDialog.value.targetBranchId,
-      quantity: allocDialog.value.quantity
-    }, { headers: { Authorization: `Bearer ${token}` } })
-    
-    ElMessage.success('调拨指令已发出，请留意冲突监控')
+    await axios.post('http://127.0.0.1:8000/business/allocation/create', allocDialog.value, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+    ElMessage.success('调拨指令已发出，请观察同步报警列表')
     allocDialog.value.visible = false
     fetchData()
   } catch (e) {
@@ -326,25 +399,65 @@ const submitAllocation = async () => {
   }
 }
 
+// 3. 提交采购入库 (超管)
+const openInboundDialog = (row) => {
+  inboundDialog.value = { 
+    visible: true, medicine_id: row.id, medicine_name: row.name, 
+    warehouse_id: 3, quantity: 100 
+  }
+}
+
+const submitInbound = async () => {
+  submitting.value = true
+  try {
+    const token = localStorage.getItem('token')
+    await axios.post('http://127.0.0.1:8000/business/inbound/create', inboundDialog.value, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+    ElMessage.success('入库登记成功')
+    inboundDialog.value.visible = false
+    fetchData()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '入库失败')
+  } finally {
+    submitting.value = false
+  }
+}
+
 onMounted(fetchData)
 </script>
 
 <style scoped>
+.medicine-view { padding: 10px; }
 .card-header { display: flex; justify-content: space-between; align-items: center; }
-.title-box { display: flex; align-items: center; }
+.title-box { display: flex; align-items: center; font-size: 16px; }
+.title-text { margin-left: 8px; font-weight: bold; }
 .ml-2 { margin-left: 10px; }
-.low-stock { color: red; font-weight: bold; }
+.low-stock-text { color: #F56C6C; }
 
 /* 购物车样式 */
-.cart-card { min-height: 400px; border-left: 1px solid #EBEEF5; }
-.cart-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px dashed #eee; }
-.item-info { flex: 1; }
-.item-name { font-weight: bold; font-size: 14px; }
-.item-price { color: #909399; font-size: 12px; }
-.cart-footer { margin-top: 20px; text-align: right; }
-.total-price { font-size: 16px; margin-bottom: 15px; }
-.total-price span { color: #F56C6C; font-weight: bold; font-size: 20px; }
-.submit-btn { width: 100%; }
-.dialog-item { display: flex; justify-content: space-between; padding: 5px 0; }
-.dialog-total { text-align: right; font-size: 18px; color: #F56C6C; font-weight: bold; margin-top: 10px; }
+.cart-card { min-height: 550px; background-color: #fafafa; }
+.empty-cart { padding-top: 80px; }
+.cart-content { display: flex; flex-direction: column; height: 450px; }
+.cart-item { 
+  display: flex; 
+  justify-content: space-between; 
+  align-items: center; 
+  padding: 15px 0; 
+  border-bottom: 1px dashed #dcdfe6; 
+}
+.item-main { flex: 1; }
+.item-name { font-weight: bold; font-size: 15px; color: #303133; }
+.item-sub { font-size: 12px; color: #909399; margin-top: 4px; }
+.item-ctrl { display: flex; align-items: center; }
+
+.cart-footer { margin-top: auto; padding-top: 20px; border-top: 2px solid #ebeef5; }
+.total-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+.total-row span { font-size: 15px; color: #606266; }
+.total-val { font-size: 24px !important; color: #F56C6C !important; font-weight: bold; }
+.submit-btn { width: 100%; height: 50px; font-size: 16px; font-weight: bold; }
+
+/* 弹窗明细样式 */
+.dialog-item { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #f2f6fc; }
+.dialog-total { text-align: right; font-size: 18px; color: #F56C6C; font-weight: bold; margin-top: 20px; }
 </style>
