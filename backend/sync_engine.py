@@ -2,7 +2,7 @@ import time
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.orm import Session
 from sqlalchemy import inspect, and_
-from datetime import datetime
+from datetime import datetime, timedelta
 from .database import SessionLocals
 from . import models
 from .config import settings
@@ -10,12 +10,42 @@ from .utils import send_conflict_email
 
 scheduler = BackgroundScheduler()
 
+# 定义所有数据库节点
 ALL_DBS = ["mysql", "pg", "mssql"]
+
+# 数据归属映射 (ID -> 负责的 DB Name)
 OWNER_MAP = {1: "mysql", 2: "pg", 3: "mssql"}
-CLOCK_SKEW_TOLERANCE = 2
+
+# 时钟偏差容忍阈值 (秒)
+CLOCK_SKEW_TOLERANCE = 10 
 
 def get_db_session(db_name):
     return SessionLocals[db_name]()
+
+def update_daily_stats(stat_type: str):
+    """
+    【统计逻辑】更新每日统计指标：'auto' (自动同步), 'conflict' (冲突), 'resolve' (手动解决)
+    """
+    db = SessionLocals["mssql"]() # 统计统一存在总库
+    today = datetime.now().strftime('%Y-%m-%d')
+    try:
+        stat = db.query(models.SyncStats).filter(models.SyncStats.sync_date == today).first()
+        if not stat:
+            stat = models.SyncStats(sync_date=today, auto_sync_count=0, conflict_count=0, manual_resolve_count=0)
+            db.add(stat)
+        
+        if stat_type == 'auto': 
+            stat.auto_sync_count += 1
+        elif stat_type == 'conflict': 
+            stat.conflict_count += 1
+        elif stat_type == 'resolve': 
+            stat.manual_resolve_count += 1
+        
+        db.commit()
+    except Exception as e:
+        print(f"统计更新失败: {e}")
+    finally:
+        db.close()
 
 def is_record_locked(table_name, record_id):
     """检查记录是否处于冲突锁定状态"""
@@ -32,28 +62,6 @@ def is_record_locked(table_name, record_id):
     finally:
         db.close()
 
-def update_daily_stats(stat_type: str):
-    """
-    更新每日统计指标：'auto', 'conflict', 'resolve'
-    """
-    db = SessionLocals["mssql"]() # 统计统一存在总库
-    today = datetime.now().strftime('%Y-%m-%d')
-    try:
-        stat = db.query(models.SyncStats).filter(models.SyncStats.sync_date == today).first()
-        if not stat:
-            stat = models.SyncStats(sync_date=today, auto_sync_count=0, conflict_count=0, manual_resolve_count=0)
-            db.add(stat)
-        
-        if stat_type == 'auto': stat.auto_sync_count += 1
-        elif stat_type == 'conflict': stat.conflict_count += 1
-        elif stat_type == 'resolve': stat.manual_resolve_count += 1
-        
-        db.commit()
-    except Exception as e:
-        print(f"统计更新失败: {e}")
-    finally:
-        db.close()
-
 def log_conflict(table, record_id, owner_db, intruder_db, diff_msg):
     """记录冲突并触发邮件报警"""
     db = SessionLocals["mssql"]()
@@ -67,32 +75,34 @@ def log_conflict(table, record_id, owner_db, intruder_db, diff_msg):
         ).first()
         
         if not exists:
-            print(f"📧 [发现冲突] {table}:{record_id} -> {diff_msg}")
+            detailed_reason = f"内容冲突: {diff_msg}"
+            print(f"📧 [冲突报警] {table}:{record_id} -> {detailed_reason}")
+            
+            # 1. 存入冲突表
             conflict = models.SyncConflictLog(
                 table_name=table,
                 record_id=str(record_id),
                 source_db=owner_db,
                 target_db=intruder_db,
-                conflict_reason=diff_msg, # 存储详细的 [字段:旧 vs 新]
+                conflict_reason=detailed_reason,
                 status='PENDING'
             )
             db.add(conflict)
             db.commit()
-            update_daily_stats('conflict') # 【新增】
-            # 触发邮件通知
+            
+            # 2. 增加冲突统计计数
+            update_daily_stats('conflict')
+            
+            # 3. 触发邮件通知
             try:
-                send_conflict_email(table, record_id, diff_msg)
+                send_conflict_email(table, record_id, detailed_reason)
             except Exception as mail_err:
                 print(f"邮件发送失败: {mail_err}")
     finally:
         db.close()
 
 def get_model_diff_str(obj1, obj2, model_class, source_db, target_db):
-    """
-    【核心修复】获取差异描述字符串。
-    1. 自动处理 PG ID 偏移。
-    2. 只有内容真正不一致时才返回描述。
-    """
+    """【内容比对】加入 PostgreSQL ID 偏移兼容 (+253)"""
     mapper = inspect(model_class)
     diffs = []
     for column in mapper.attrs:
@@ -110,7 +120,6 @@ def get_model_diff_str(obj1, obj2, model_class, source_db, target_db):
             elif source_db == 'pg' and target_db != 'pg':
                 if v1 is not None: v1 -= 253
 
-        # 执行比对
         is_different = False
         if isinstance(v1, float) and isinstance(v2, float):
             if abs(v1 - v2) > 0.001: is_different = True
@@ -123,6 +132,7 @@ def get_model_diff_str(obj1, obj2, model_class, source_db, target_db):
     return ", ".join(diffs) if diffs else None
 
 def get_owner_db(item, source_db_name):
+    """判断数据拥有者"""
     owner_id = getattr(item, 'branch_id', getattr(item, 'warehouse_id', -1))
     if hasattr(item, 'prescription_id'):
         if source_db_name == 'mysql': owner_id = 1
@@ -131,6 +141,7 @@ def get_owner_db(item, source_db_name):
     return OWNER_MAP.get(owner_id)
 
 def sync_logic():
+    """全能网格广播同步引擎：支持全表监控、冲突锁定、ID偏移补丁、精准统计"""
     sync_models = [models.User, models.Inventory, models.Prescription, models.PrescriptionItem, models.AlertMessage]
 
     for model_class in sync_models:
@@ -163,28 +174,32 @@ def sync_logic():
                                 if t_ref:
                                     t_ref.last_updated = item.last_updated
                                     target_session.commit()
-                                update_daily_stats('auto') # 统计自动同步
+                                
+                                # 【核心修改】执行了真实的插入，统计数+1
+                                update_daily_stats('auto') 
+                                print(f"➕ [同步新增] {table_name}:{str(item.id)[:8]} {source_db_name}->{target_db_name}")
+
                             else:
-                                # 【核心调用修复】获取详细的差异字符串
                                 diff_str = get_model_diff_str(item, target_item, model_class, source_db_name, target_db_name)
                                 
                                 # 情况 2: Owner 时间领先 (正常更新)
                                 if item.last_updated > target_item.last_updated:
                                     if diff_str:
-                                        # 内容真的有变，执行更新
+                                        # 内容有变，执行更新
                                         for c in inspect(model_class).attrs:
                                             if c.key != 'id': 
                                                 val = getattr(item, c.key)
                                                 if target_db_name == 'pg' and c.key == 'medicine_id': val += 253
                                                 setattr(target_item, c.key, val)
                                         target_session.commit()
-                                        print(f"⬆️ [更新] {table_name}:{str(item.id)[:8]} {source_db_name}->{target_db_name} | {diff_str}")
+                                        
+                                        # 【核心修改】内容变了才计入统计，并打印日志
+                                        update_daily_stats('auto')
+                                        print(f"⬆️ [同步更新] {table_name}:{str(item.id)[:8]} {source_db_name}->{target_db_name} | {diff_str}")
                                     else:
-                                        # 仅时间偏移，静默对齐
+                                        # 仅时间偏移，静默对齐，不计入同步次数，不打印日志
                                         target_item.last_updated = item.last_updated
                                         target_session.commit()
-                                    
-                                    update_daily_stats('auto') # 统计自动同步
                                 
                                 # 情况 3: Target 时间领先 (潜在冲突)
                                 elif target_item.last_updated > item.last_updated:
@@ -200,7 +215,7 @@ def sync_logic():
                                             target_item.last_updated = item.last_updated
                                             target_session.commit()
                                         else:
-                                            # 【核心修复】传入详细的 diff_str 供邮件发送
+                                            # 确认为非拥有者篡改 -> 报警
                                             log_conflict(table_name, item.id, source_db_name, target_db_name, diff_str)
                         except Exception:
                             target_session.rollback()
@@ -210,11 +225,12 @@ def sync_logic():
                 source_session.close()
 
 def scheduled_task():
-    # 【关键修复】每轮执行前刷新配置，确保 SMTP 参数最新
+    """定时任务：自动刷新配置并执行同步"""
     settings.refresh()
     if settings.SCHEDULED_SYNC: 
         sync_logic()
 
 def start_sync_job():
+    # 使用动态参数启动
     scheduler.add_job(scheduled_task, 'interval', seconds=settings.SYNC_INTERVAL, id='sync_job_id', max_instances=3, coalesce=True)
     scheduler.start()

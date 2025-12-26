@@ -10,6 +10,7 @@ from ..security import get_current_user
 from .. import models
 from ..sync_engine import sync_logic 
 from ..config import settings
+import time
 
 router = APIRouter(prefix="/business", tags=["核心业务"])
 
@@ -104,7 +105,9 @@ def create_prescription(req: PrescriptionCreate, current_user: dict = Depends(ge
         new_pres.total_amount = total_price
         db.commit()
         if settings.REAL_TIME_SYNC:
-            try: sync_logic()
+            try: 
+                time.sleep(1)
+                sync_logic()
             except: pass
         return {"status": "success"}
     except Exception as e:
@@ -134,6 +137,11 @@ def create_allocation(req: AllocationReq, current_user: dict = Depends(get_curre
         detail = f"【调配】从 {DB_BRANCH_NAMES.get(req.source_branch_id)} 调拨 {med.name} x{req.quantity} 至 {DB_BRANCH_NAMES.get(req.target_branch_id)}"
         db.add(models.AdminAction(operator_id=current_user['id'], action_type="ALLOCATE", details=detail, create_time=now_time))
         db.commit()
+        if settings.REAL_TIME_SYNC:
+            try: 
+                time.sleep(1)
+                sync_logic()
+            except: pass
         return {"status": "success"}
     except Exception as e:
         db.rollback()
@@ -161,6 +169,11 @@ def create_inbound(req: InboundReq, current_user: dict = Depends(get_current_use
         detail = f"【入库】为 {DB_BRANCH_NAMES.get(req.warehouse_id)} 办理 {med.name} 采购入库 x{req.quantity}"
         db.add(models.AdminAction(operator_id=current_user['id'], action_type="INBOUND", details=detail, create_time=now_time))
         db.commit()
+        if settings.REAL_TIME_SYNC:
+            try: 
+                time.sleep(1)
+                sync_logic()
+            except: pass
         return {"status": "success"}
     except Exception as e:
         db.rollback()
